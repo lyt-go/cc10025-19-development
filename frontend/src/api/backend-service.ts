@@ -14,6 +14,21 @@ export async function listEntries(
   return await response.json()
 }
 
+/**
+ * 本轮可提交核验的冷存任务：后端按分层执行数据索引过滤，
+ * 只返回来源已关联且尚未提交核验的记录。
+ */
+export async function listColdStorageCandidates(
+  filters: { asset_id?: string; activation_id?: string; policy_number?: string } = {},
+): Promise<PageResult> {
+  const query = new URLSearchParams(
+    Object.entries(filters).filter(([, value]) => value),
+  ).toString()
+  const response = await request(`/api/cold_storage/candidates?${query}`)
+  if (!response.ok) throw new Error('可核验对象读取失败')
+  return await response.json()
+}
+
 export async function createEntry(
   key: string,
   values: Record<string, string>,

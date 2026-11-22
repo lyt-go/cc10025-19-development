@@ -13,6 +13,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
+from app import execution_index
 from app.services.base import BaseModuleService
 from app.store import store
 
@@ -48,17 +49,39 @@ class TierPolicyService(BaseModuleService):
         entry["pending"] = False
 
         asset_id = str(entry.get("目标资产", ""))
+        policy_number = str(entry.get("策略编号", ""))
+        policy_version = str(entry.get("策略版本", ""))
 
-        # 写入分层策略数据产物
-        self._write_policy_record(asset_id, entry)
+        # 每次生效分配唯一编号，并确定本次真实执行分区；同一资产多次切换策略时，
+        # 冷存任务靠这个编号回指到当时的生效依据，而不是靠资产号猜。
+        activation_id = execution_index.allocate_activation_id()
+        execution_partition = self._execution_partition(
+            asset_id, target_tier, policy_version, activation_id)
+        entry["策略生效编号"] = activation_id
+        entry["执行分区"] = execution_partition
+
+        # 写入分层策略数据产物（保留按资产的最新视图，兼容既有读取方式）
+        self._write_policy_record(
+            asset_id, entry, execution_partition=execution_partition)
+
+        # 生效依据按策略生效编号单独登记，旧版本不会被新版本覆盖
+        activation = execution_index.record_activation(
+            asset_id=asset_id,
+            policy_number=policy_number,
+            policy_version=policy_version,
+            current_tier=current_tier,
+            target_tier=target_tier,
+            execution_partition=execution_partition,
+            activation_id=activation_id,
+        )
 
         # 根据分层方向触发下游动作
         if current_tier == "HOT" and target_tier == "COLD":
-            # 热层 → 冷层：创建冷存储任务
-            self._trigger_cold_storage(asset_id, entry)
+            # 热层 → 冷层：创建冷存储任务，并带上来源策略关系
+            self._trigger_cold_storage(asset_id, entry, activation)
         elif current_tier == "COLD" and target_tier == "HOT":
             # 冷层 → 热层：创建预热回迁任务
-            self._trigger_hot_prefetch(asset_id, entry)
+            self._trigger_hot_prefetch(asset_id, entry, activation)
         elif target_tier == "WARM":
             # 温层：更新保留规则关联
             self._link_retention_rule(asset_id, entry)
@@ -67,8 +90,11 @@ class TierPolicyService(BaseModuleService):
         self._write_audit_entry(
             entity="分层策略",
             action="生效",
-            target_id=str(entry.get("策略编号", "")),
-            detail=f"分层策略 {asset_id} {current_tier}→{target_tier} 已生效",
+            target_id=policy_number,
+            detail=(
+                f"分层策略 {asset_id} {current_tier}→{target_tier} 已生效，"
+                f"生效编号 {activation_id}，执行分区 {execution_partition}"
+            ),
         )
 
         # 更新血缘图谱中的层级信息
@@ -82,20 +108,40 @@ class TierPolicyService(BaseModuleService):
         return super().run_action(entry_id, action)
 
     # ---------- 文件 I/O ----------
-    def _write_policy_record(self, asset_id: str, entry: dict[str, Any]) -> None:
-        filename = f"tier_policy_{asset_id}.json"
-        path = os.path.join(DATA_DIR, filename)
+    def _execution_partition(self, asset_id: str, target_tier: str,
+                              policy_version: str, activation_id: str) -> str:
+        """按生效编号生成真实执行分区，保证每次策略切换落点可区分。"""
+        tier = (target_tier or "UNKNOWN").strip().upper()
+        version = (policy_version or "v1").strip()
+        return f"{asset_id}/{tier}/{version}/{activation_id}"
+
+    def _write_policy_record(self, asset_id: str, entry: dict[str, Any],
+                              *, execution_partition: str = "") -> str:
+        """写出生效依据：按生效编号存档一份，并按资产维护最新视图。"""
         record = {
+            "activation_id": str(entry.get("策略生效编号", "")),
             "asset_id": asset_id,
+            "policy_number": str(entry.get("策略编号", "")),
+            "policy_version": str(entry.get("策略版本", "")),
             "current_tier": str(entry.get("当前层级", "")),
             "target_tier": str(entry.get("目标层级", "")),
+            "execution_partition": execution_partition,
             "migration_condition": str(entry.get("迁移条件", "")),
             "cooling_days": str(entry.get("冷却天数", "")),
             "access_threshold": str(entry.get("访问频次阈值", "")),
             "activated_at": datetime.now(timezone.utc).isoformat(),
         }
-        with open(path, "w", encoding="utf-8") as f:
+        latest_name = f"tier_policy_{asset_id}.json"
+        with open(os.path.join(DATA_DIR, latest_name), "w", encoding="utf-8") as f:
             json.dump(record, f, ensure_ascii=False, indent=2, default=str)
+
+        activation_id = record["activation_id"]
+        if activation_id:
+            with open(os.path.join(execution_index.INDEX_DIR,
+                                   execution_index.evidence_filename(activation_id)),
+                      "w", encoding="utf-8") as f:
+                json.dump(record, f, ensure_ascii=False, indent=2, default=str)
+        return latest_name
 
     def read_policy_record(self, asset_id: str) -> dict[str, Any] | None:
         filename = f"tier_policy_{asset_id}.json"
@@ -106,10 +152,12 @@ class TierPolicyService(BaseModuleService):
             return json.load(f)
 
     # ---------- 跨模块副作用 ----------
-    def _trigger_cold_storage(self, asset_id: str, policy: dict[str, Any]) -> None:
-        """创建冷存储迁移任务。"""
+    def _trigger_cold_storage(self, asset_id: str, policy: dict[str, Any],
+                              activation: dict[str, Any] | None = None) -> None:
+        """创建冷存储迁移任务，并写入来源策略与真实执行分区。"""
         cold_rows = store.rows("cold_storage")
         next_id = max((int(r.get("id", 0)) for r in cold_rows), default=0) + 1
+        activation = activation or {}
         task = {
             "id": next_id,
             "status": "待调度",
@@ -123,10 +171,24 @@ class TierPolicyService(BaseModuleService):
             "预计耗时": "估算中",
             "迁移状态": "待调度",
             "校验摘要": "",
+            # 分层执行数据索引字段：来源策略生效编号 + 真实执行分区
+            "策略生效编号": str(activation.get("策略生效编号") or ""),
+            "来源策略编号": str(activation.get("策略编号") or ""),
+            "来源策略版本": str(activation.get("策略版本") or ""),
+            "执行分区": str(
+                activation.get("执行分区")
+                or policy.get("执行分区")
+                or ""
+            ),
+            "来源状态": execution_index.SOURCE_LINKED,
+            "核验状态": "未核验",
         }
         cold_rows.append(task)
+        # 新增任务立即进入分层执行数据索引，冷存储管理可直接按生效编号筛选
+        execution_index.build_index(cold_rows)
 
-    def _trigger_hot_prefetch(self, asset_id: str, policy: dict[str, Any]) -> None:
+    def _trigger_hot_prefetch(self, asset_id: str, policy: dict[str, Any],
+                              activation: dict[str, Any] | None = None) -> None:
         """创建预热回迁任务。"""
         hot_rows = store.rows("hot_prefetch")
         next_id = max((int(r.get("id", 0)) for r in hot_rows), default=0) + 1

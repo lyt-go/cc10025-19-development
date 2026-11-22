@@ -14,6 +14,8 @@ export type ModuleMeta = {
   entity: string
   desc: string
   fields: string[]
+  /** 登记表单字段；缺省时使用 fields，索引派生字段不要求人工录入。 */
+  createFields?: string[]
   statuses: string[]
   actions: string[]
   actionTargets: Record<string, string>

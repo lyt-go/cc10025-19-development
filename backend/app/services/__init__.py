@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from app import execution_index
 from app.services.asset_catalog import AssetCatalogService
 from app.services.tier_policy import TierPolicyService
 from app.services.lineage_graph import LineageGraphService
@@ -48,6 +49,9 @@ _INSTANCES: dict[str, object] = {}
 for cls in _SERVICE_CLASSES:
     instance = cls()
     _INSTANCES[cls.MODULE] = instance
+
+# 预置策略生效依据，保证冷存任务在启动后即可按来源策略筛选。
+execution_index.bootstrap()
 
 
 def service_for(module: str) -> object | None:

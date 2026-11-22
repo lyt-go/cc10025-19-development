@@ -1,0 +1,17 @@
+{
+  "asset_id": "ASSE-0003",
+  "task_id": "COLD-9003",
+  "target_storage": "S3-GLACIER",
+  "compression": "ZSTD",
+  "migration_volume": "估算中",
+  "status": "待调度",
+  "checksum": "",
+  "activation_id": "TIERACT-0002",
+  "source_policy": "TIER-0102",
+  "source_version": "v2",
+  "execution_partition": "ASSE-0003/COLD/v2/TIERACT-0002",
+  "verification_status": "未核验",
+  "verification_activation": "",
+  "verification_file": "",
+  "updated_at": "2026-11-22T15:30:45.618689+00:00"
+}

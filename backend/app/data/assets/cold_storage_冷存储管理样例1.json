@@ -6,5 +6,12 @@
   "migration_volume": "冷存储管理样例1",
   "status": "已完成",
   "checksum": "CRC32校验通过",
-  "updated_at": "2026-11-19T01:42:58.810466+00:00"
+  "activation_id": "",
+  "source_policy": "",
+  "source_version": "",
+  "execution_partition": "",
+  "verification_status": "未核验",
+  "verification_activation": "",
+  "verification_file": "",
+  "updated_at": "2026-11-22T15:32:05.035637+00:00"
 }

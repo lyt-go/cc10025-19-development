@@ -73,6 +73,66 @@ def export_entries(
     )
 
 
+@router.get("/cold_storage/candidates", response_model=PageResult[dict])
+def list_cold_storage_candidates(
+    asset_id: str | None = Query(default=None),
+    activation_id: str | None = Query(default=None),
+    policy_number: str | None = Query(default=None),
+    policy_version: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=20, ge=1, le=200),
+) -> PageResult[dict]:
+    """本轮可提交核验的冷存任务：只包含来源已关联且未提交核验的记录。"""
+    service = require_service("cold_storage")
+    items, total = service.list_candidates(
+        asset_id=asset_id, activation_id=activation_id,
+        policy_number=policy_number, policy_version=policy_version,
+        page=page, size=size,
+    )
+    return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/cold_storage/index", response_model=dict)
+def get_cold_storage_index() -> dict[str, Any]:
+    """分层执行数据索引：策略生效编号 ↔ 冷存任务 ↔ 真实执行分区。"""
+    service = require_service("cold_storage")
+    entries = service.execution_index_rows()
+    linked = sum(1 for row in entries if row.get("来源状态") == "已关联")
+    return {
+        "total": len(entries),
+        "linked": linked,
+        "unknown": len(entries) - linked,
+        "entries": entries,
+    }
+
+
+@router.get("/cold_storage/unresolved", response_model=dict)
+def list_cold_storage_unresolved(
+    asset_id: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """仍缺策略来源的冷存任务，核验前用来核对哪些迁移没有生效依据。"""
+    service = require_service("cold_storage")
+    items = service.list_unresolved(asset_id=asset_id)
+    return {"total": len(items), "items": items}
+
+
+@router.get("/cold_storage/activation/{activation_id}", response_model=dict)
+def get_cold_storage_activation(activation_id: str) -> dict[str, Any]:
+    """按策略生效编号回溯生效依据和引用它的冷存任务。"""
+    service = require_service("cold_storage")
+    activation, tasks = service.trace_activation(activation_id)
+    if activation is None and not tasks:
+        raise HTTPException(
+            status_code=404, detail=f"策略生效编号 {activation_id} 不存在")
+    return {
+        "activation": activation,
+        "tasks": tasks,
+        "missing_source": [
+            task for task in tasks if not task.get("来源策略生效编号")
+        ],
+    }
+
+
 @router.get("/{module}/{entry_id}", response_model=dict)
 def get_entry(module: str, entry_id: int) -> dict[str, Any]:
     service = require_service(module)
